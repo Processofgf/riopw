@@ -940,6 +940,11 @@ async def depodepo_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def addbot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
 depodepo_conv = ConversationHandler(
     entry_points=[CommandHandler("depodepo", depodepo_cmd)],
     states={
@@ -1183,11 +1188,6 @@ async def addbot_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Login successful and session saved, but auto-connect failed:\n"
             f"{e}\nPlease restart the bot on Railway once."
         )
-    return ConversationHandler.END
-
-
-async def addbot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled.")
     return ConversationHandler.END
 
 
