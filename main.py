@@ -940,11 +940,6 @@ async def depodepo_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-async def addbot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled.")
-    return ConversationHandler.END
-
-
 depodepo_conv = ConversationHandler(
     entry_points=[CommandHandler("depodepo", depodepo_cmd)],
     states={
@@ -1055,6 +1050,75 @@ broadbroad_conv = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", addbot_cancel)],
 )
+
+
+# ---------------- /mkbaag (hidden: ban both buyer+seller of a past deal) ----------------
+def _recent_escrow_groups(hours: int = 2):
+    """Pichle N ghante me bane escrow groups (jinka trade id ban chuka hai)."""
+    now = datetime.now(timezone.utc)
+    result = []
+    for chat_id, group in escrow_groups.items():
+        created_at = group.get("created_at")
+        if not created_at or not group.get("trade_id"):
+            continue
+        if now - created_at <= timedelta(hours=hours):
+            result.append((chat_id, group))
+    return result
+
+
+async def mkbaag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # hidden command - kahin listed nahi, bas DM me hi chalega
+    if update.effective_chat.type != "private":
+        return
+
+    recent = _recent_escrow_groups(hours=2)
+    if not recent:
+        await update.message.reply_text("No deals in the last 2 hours found.")
+        return
+
+    buttons = [
+        [InlineKeyboardButton(f"[{group['trade_id']}] {group.get('escrow_type', '')}", callback_data=f"mkbaag_select_{chat_id}")]
+        for chat_id, group in recent
+    ]
+    await update.message.reply_text(
+        "Select the group (by trade ID) to ban both users from:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def mkbaag_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = int(query.data.split("_")[-1])
+    group = escrow_groups.get(chat_id)
+    if not group:
+        await query.edit_message_text("That group is no longer active.")
+        return
+
+    banned, failed = [], []
+    for role in ("buyer", "seller"):
+        person = group.get(role)
+        if not person:
+            continue
+        try:
+            await context.bot.ban_chat_member(chat_id, person["user_id"])
+            banned.append(f"{role} ({person['user_id']})")
+        except Exception as e:
+            logger.error(f"Could not ban {role} {person['user_id']} in chat {chat_id}: {e}")
+            failed.append(f"{role} ({person['user_id']})")
+
+    lines = [f"Trade [{group['trade_id']}]:"]
+    if banned:
+        lines.append("✅ Banned: " + ", ".join(banned))
+    if failed:
+        lines.append("❌ Failed: " + ", ".join(failed))
+    if not banned and not failed:
+        lines.append("No buyer/seller set for this deal, nobody to ban.")
+
+    await query.edit_message_text("\n".join(lines))
+
+
+mkbaag_handler = CommandHandler("mkbaag", mkbaag_cmd)
 
 
 # ---------------- Auto-kick extra members ----------------
@@ -1191,6 +1255,11 @@ async def addbot_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def addbot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
 addbot_conv = ConversationHandler(
     entry_points=[CommandHandler("addbot", addbot_cmd)],
     states={
@@ -1264,6 +1333,8 @@ def main():
     app.add_handler(addbot_conv)
     app.add_handler(depodepo_conv)
     app.add_handler(broadbroad_conv)
+    app.add_handler(mkbaag_handler)
+    app.add_handler(CallbackQueryHandler(mkbaag_select_handler, pattern="^mkbaag_select_"))
     app.add_handler(CallbackQueryHandler(escrow_type_handler, pattern="^escrow_"))
     app.add_handler(CallbackQueryHandler(menu_button_handler, pattern="^menu_"))
     app.add_handler(CallbackQueryHandler(token_button_handler, pattern="^token_"))
