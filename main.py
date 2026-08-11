@@ -62,6 +62,14 @@ referred_users = {}          # invitee_user_id -> referrer_user_id (double-count
 referrals = {}               # user_id -> {"total_invites": int, "tickets": int}
 
 
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generic /cancel - kisi bhi ConversationHandler (addbot, depodepo, broadbroad)
+    ka fallback. Yaha upar define kiya hai taaki neeche jitne bhi ConversationHandler
+    banein, sab isko use kar sakein (order-of-definition ka issue na aaye)."""
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
 def generate_referral_code(user_id: int) -> str:
     """Har user ke liye ek consistent (deterministic) 15-char alphanumeric code."""
     rng = random.Random(user_id)
@@ -946,7 +954,7 @@ depodepo_conv = ConversationHandler(
         DEPODEPO_SELECT: [CallbackQueryHandler(depodepo_select, pattern="^depo_select_")],
         DEPODEPO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, depodepo_amount)],
     },
-    fallbacks=[CommandHandler("cancel", addbot_cancel)],
+    fallbacks=[CommandHandler("cancel", cancel_cmd)],
 )
 
 
@@ -1048,7 +1056,7 @@ broadbroad_conv = ConversationHandler(
         BROAD_IMAGE_CHOICE: [CallbackQueryHandler(broadbroad_image_choice, pattern="^broad_img_")],
         BROAD_IMAGE_UPLOAD: [MessageHandler(filters.PHOTO, broadbroad_image_upload)],
     },
-    fallbacks=[CommandHandler("cancel", addbot_cancel)],
+    fallbacks=[CommandHandler("cancel", cancel_cmd)],
 )
 
 
@@ -1256,6 +1264,8 @@ async def addbot_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addbot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # (ab _cancel_cmd_ shared function use ho rahi hai fallbacks me, ye
+    # sirf backward-compat ke liye rakha hai)
     await update.message.reply_text("Cancelled.")
     return ConversationHandler.END
 
@@ -1267,7 +1277,7 @@ addbot_conv = ConversationHandler(
         ADDBOT_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, addbot_otp)],
         ADDBOT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, addbot_password)],
     },
-    fallbacks=[CommandHandler("cancel", addbot_cancel)],
+    fallbacks=[CommandHandler("cancel", cancel_cmd)],
 )
 
 
