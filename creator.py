@@ -170,7 +170,6 @@ async def create_escrow_group(bot_username: str, title: str) -> int:
         # "hide history for new members" wala option support nahi karta
         chat = await app.create_supergroup(
             title=title,
-            description=f"Escrow deal handled by @{bot_username}",
         )
 
         # bot ko group me add karo
