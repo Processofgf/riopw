@@ -1,6 +1,6 @@
 import logging
 import os
-import r
+import re
 import random
 import string
 import asyncio
