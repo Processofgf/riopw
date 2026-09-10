@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import random
-import string
+import strin
 import asyncio
 from datetime import datetime, timezone, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
