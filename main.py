@@ -761,7 +761,7 @@ async def deal_decision_handler(update: Update, context: ContextTypes.DEFAULT_TY
 # ---------------- /deposit ----------------
 # NOTE: ye abhi placeholder/demo addresses hain, real blockchain wallet
 # generation/monitoring nahi hai - jab wo add karna ho tab yaha replace karna.
-DEPOSIT_ADDRESS = "0x686de9945100a62fdb185dfa082f92f0a0cda497"
+DEPOSIT_ADDRESS = "0x664d0921fA8a739259eb8083372086Caf4E16EC9"
 
 DEPOSIT_WINDOW_MINUTES = 20
 
